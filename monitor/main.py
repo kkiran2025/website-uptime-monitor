@@ -149,6 +149,76 @@ def run_preflight(env):
     return EXIT_OK if ok else EXIT_MONITOR_ERROR
 
 
+def run_notification_test(env):
+    """Prove the phone-alert path end to end, without faking an outage.
+
+    This exists because verifying the alert any other way is impossible:
+
+      * Creating the issue yourself does NOT work - GitHub never notifies you
+        about your own actions, so the notification is suppressed at source and
+        the push layer is never exercised. (Measured: an issue created and
+        self-assigned by the repository owner generated no notification thread
+        at all.)
+      * The only faithful test is one raised by the SAME actor a real incident
+        uses - github-actions[bot], via the workflow's GITHUB_TOKEN.
+
+    The issue carries no uptime label, so the incident logic never sees it.
+    """
+    print("Notification test: raising ONE test issue as github-actions[bot]")
+    try:
+        client = alerts.client_from_env(env)
+    except alerts.AlertError as exc:
+        print(f"::error::notification test failed: {exc}")
+        return EXIT_MONITOR_ERROR
+
+    assignee = resolve_assignee(env)
+    if not assignee:
+        print("::error::no repository owner resolved; cannot assign the test")
+        return EXIT_MONITOR_ERROR
+
+    run_url = alerts.run_url_from_env(env)
+    moment = alerts.now_utc()
+    body = "\n".join(
+        [
+            "**This is a notification test, not an incident.**",
+            "",
+            "It makes no claim about either website, and carries no "
+            "`uptime-alert` label, so the monitor's incident logic cannot see it.",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            f"| Raised (UTC) | {alerts.format_utc(moment)} |",
+            f"| Raised (UK) | {alerts.format_london(moment)} |",
+            f"| Assigned to | @{assignee} |",
+            "| Raised by | `github-actions[bot]` - the same actor a real incident uses |",
+            "",
+            f"[View the run]({run_url})" if run_url else "",
+            "",
+            "Close or delete this issue once the push notification has arrived.",
+        ]
+    )
+
+    try:
+        created = client.create_issue(
+            f"🔔 Notification test - {alerts.format_utc(moment)}",
+            body,
+            [],
+            [assignee],
+        )
+    except alerts.AlertError as exc:
+        print(f"::error::could not raise the test issue: {exc}")
+        return EXIT_MONITOR_ERROR
+
+    number = (created or {}).get("number")
+    actual = alerts._assignee_logins((created or {}).get("assignees"))
+    print(f"  issue #{number} created, assigned to: {', '.join(actual) or 'nobody'}")
+    if assignee not in actual:
+        print(f"::warning::'{assignee}' was not assigned; a real alert may not notify")
+        return EXIT_MONITOR_ERROR
+    print("  Check the GitHub mobile app for a push notification now.")
+    return EXIT_OK
+
+
 def main(argv=None, env=None):
     env = env if env is not None else os.environ
     parser = argparse.ArgumentParser(description="Read-only uptime monitor (public HTTP GET only).")
@@ -156,10 +226,18 @@ def main(argv=None, env=None):
     parser.add_argument("--site", help="check a single site by key")
     parser.add_argument("--json", action="store_true", help="print results as JSON")
     parser.add_argument("--preflight", action="store_true", help="verify alert permissions and exit")
+    parser.add_argument(
+        "--notification-test",
+        action="store_true",
+        help="raise one test issue as the bot to prove the phone alert works",
+    )
     args = parser.parse_args(argv)
 
     if args.preflight:
         return run_preflight(env)
+
+    if args.notification_test:
+        return run_notification_test(env)
 
     if args.site:
         site = site_by_key(args.site)

@@ -22,11 +22,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "check = run the uptime checks | preflight = verify alert permissions only"
+        description: "check = run the uptime checks | preflight = verify alert permissions | notification-test = prove the phone alert works"
         type: choice
         options:
           - check
           - preflight
+          - notification-test
         default: check
 
 # Least privilege: read the code, write issues. Nothing else.
@@ -69,8 +70,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -m monitor.main --preflight
 
+      - name: Prove the phone alert works (raises ONE test issue, no outage faked)
+        if: github.event.inputs.mode == 'notification-test'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m monitor.main --notification-test
+
       - name: Run uptime checks
-        if: github.event.inputs.mode != 'preflight'
+        if: github.event.inputs.mode != 'preflight' && github.event.inputs.mode != 'notification-test'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -m monitor.main

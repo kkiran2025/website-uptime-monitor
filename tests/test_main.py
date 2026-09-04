@@ -10,6 +10,7 @@ from monitor import main as main_module
 from monitor import reasons
 from monitor.check import CheckOutcome
 from monitor.config import SITES
+from tests.fakes import FakeGitHubClient
 
 
 def outcome(site, ok=True, reason=reasons.OK, status=200, detail="4/4 indicator groups present"):
@@ -109,6 +110,54 @@ class TestJsonMode(unittest.TestCase):
                 contextlib.redirect_stdout(buffer):
             main_module.main(["--dry-run"], env={})
         self.assertIn("Direct Packaging", buffer.getvalue())
+
+
+class TestNotificationTestMode(unittest.TestCase):
+    """Raises a test issue as the bot; must never look like an incident."""
+
+    def _run(self, client, env=None):
+        env = env or {"GITHUB_TOKEN": "x", "GITHUB_REPOSITORY": "kkiran2025/repo",
+                      "GITHUB_REPOSITORY_OWNER": "kkiran2025"}
+        with mock.patch.object(main_module.alerts, "client_from_env", return_value=client), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main_module.run_notification_test(env)
+        return code, out.getvalue()
+
+    def test_creates_one_issue_assigned_to_the_owner(self):
+        client = FakeGitHubClient(open_issue=None)
+        code, _ = self._run(client)
+        self.assertEqual(code, main_module.EXIT_OK)
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(
+            [a["login"] for a in client.created[0]["assignees"]], ["kkiran2025"]
+        )
+
+    def test_the_test_issue_carries_no_uptime_label(self):
+        """Otherwise the incident logic would mistake it for a real outage."""
+        client = FakeGitHubClient(open_issue=None)
+        self._run(client)
+        self.assertEqual(client.created[0]["labels"], [])
+
+    def test_body_makes_clear_it_is_not_an_incident(self):
+        client = FakeGitHubClient(open_issue=None)
+        self._run(client)
+        self.assertIn("not an incident", client.created[0]["body"])
+
+    def test_reports_an_error_when_the_owner_cannot_be_resolved(self):
+        client = FakeGitHubClient(open_issue=None)
+        code, _ = self._run(client, env={"GITHUB_TOKEN": "x", "GITHUB_REPOSITORY": "no-slash"})
+        self.assertEqual(code, main_module.EXIT_MONITOR_ERROR)
+        self.assertEqual(client.created, [])
+
+    def test_a_normal_run_never_triggers_it(self):
+        results = [outcome(site) for site in SITES]
+        with mock.patch.object(main_module, "check_all", return_value=results), \
+                mock.patch.object(main_module, "run_notification_test",
+                                  side_effect=AssertionError("must not fire")), \
+                mock.patch.object(main_module.alerts, "client_from_env",
+                                  side_effect=AssertionError("no GitHub in dry-run")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main_module.main(["--dry-run"], env={}), main_module.EXIT_OK)
 
 
 class TestAssignee(unittest.TestCase):
