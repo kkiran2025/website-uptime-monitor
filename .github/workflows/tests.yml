@@ -1,0 +1,32 @@
+name: Tests
+
+# Guards the monitor itself. A regression in the validator would silently stop
+# real outages being detected, so the suite runs on every push.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the monitor
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run the test suite
+        # No network access is required or used by these tests.
+        run: python3 -m unittest discover -s tests -t . -v

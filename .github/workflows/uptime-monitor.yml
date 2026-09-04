@@ -1,0 +1,69 @@
+name: Uptime monitor
+
+# Read-only availability checks against two public storefronts.
+# This workflow performs public HTTP GET requests only. It never logs in,
+# never submits a form, never adds to a basket, and never writes to either
+# website or to this repository.
+
+on:
+  schedule:
+    # Every five minutes. GitHub schedules are best-effort: runs can start
+    # late (occasionally by several minutes) or be skipped entirely under
+    # platform load. Treat the cadence as "about every five minutes", and do
+    # not infer an outage from a late or missing run.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = run the uptime checks | preflight = verify alert permissions only"
+        type: choice
+        options:
+          - check
+          - preflight
+        default: check
+
+# Least privilege: read the code, write issues. Nothing else.
+# The monitor keeps its state in the issues themselves, so it never needs
+# contents: write.
+permissions:
+  contents: read
+  issues: write
+
+# Never let two checks overlap. A slow run must finish rather than be
+# cancelled, otherwise an in-flight incident could be half-recorded.
+concurrency:
+  group: uptime-monitor
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check storefronts
+    runs-on: ubuntu-latest
+    # Worst case is 2 sites x 3 attempts x 30s plus backoff (~3.3 minutes).
+    timeout-minutes: 6
+
+    steps:
+      - name: Check out the monitor
+        uses: actions/checkout@v4
+        with:
+          # Do not leave a credential in .git/config; nothing here pushes.
+          persist-credentials: false
+
+      - name: Report runtime
+        run: python3 --version
+
+      - name: Verify alert permissions (no incident is created)
+        if: github.event.inputs.mode == 'preflight'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m monitor.main --preflight
+
+      - name: Run uptime checks
+        if: github.event.inputs.mode != 'preflight'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m monitor.main
