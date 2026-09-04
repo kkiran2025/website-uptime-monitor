@@ -189,7 +189,11 @@ def run_notification_test(env):
             "| --- | --- |",
             f"| Raised (UTC) | {alerts.format_utc(moment)} |",
             f"| Raised (UK) | {alerts.format_london(moment)} |",
-            f"| Assigned to | @{assignee} |",
+            # Deliberately NOT an @mention. A real incident body contains no
+            # @mention, so notifying via one would test a mechanism the real
+            # alert never uses. This must notify by ASSIGNMENT alone, exactly
+            # as a genuine outage does - GitHub reports that as reason=assign.
+            f"| Assigned to | {assignee} |",
             "| Raised by | `github-actions[bot]` - the same actor a real incident uses |",
             "",
             f"[View the run]({run_url})" if run_url else "",
