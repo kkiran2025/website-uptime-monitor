@@ -7,11 +7,18 @@ name: Uptime monitor
 
 on:
   schedule:
-    # Every five minutes. GitHub schedules are best-effort: runs can start
-    # late (occasionally by several minutes) or be skipped entirely under
-    # platform load. Treat the cadence as "about every five minutes", and do
-    # not infer an outage from a late or missing run.
-    - cron: "*/5 * * * *"
+    # Every five minutes, deliberately OFF the :00/:05/:10 boundary.
+    #
+    # "*/5 * * * *" fires on the exact five-minute marks, which are the most
+    # contended slots on the whole platform, and GitHub's own documentation
+    # advises scheduling away from them to reduce delay. On this repository
+    # that form produced ZERO runs in the first hour after creation, so the
+    # schedule now fires at :02, :07, :12 ... - identical cadence, quieter slot.
+    #
+    # GitHub schedules remain best-effort: runs can start late or be skipped
+    # under load. Treat the cadence as "about every five minutes", and never
+    # infer an outage from a late or missing run.
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
     inputs:
       mode:
