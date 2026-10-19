@@ -73,11 +73,29 @@ class Site:
 #: Shared label applied to every incident issue.
 ALERT_LABEL = "uptime-alert"
 
+#: Label for the keep-alive reminder. Deliberately NOT ALERT_LABEL, so the
+#: incident logic (which needs ALERT_LABEL plus a site label) never sees it.
+KEEPALIVE_LABEL = "uptime-keepalive"
+
+#: GitHub switches scheduled workflows off after 60 days without repository
+#: activity. A push is the one activity known to reset that clock, so the
+#: reminder fires this many days after the last push, leaving about two weeks
+#: to act.
+KEEPALIVE_WARN_DAYS = 45
+KEEPALIVE_DISABLE_DAYS = 60
+
 #: Colours + descriptions used when creating the labels (issues: write).
 LABEL_DEFINITIONS = {
     ALERT_LABEL: ("b60205", "Automated uptime incident"),
     "uptime-direct-packaging": ("0e8a16", "Incident on directpackaging.online"),
     "uptime-mr-corn": ("fbca04", "Incident on mrcorn.uk.com"),
+}
+
+#: Kept OUT of LABEL_DEFINITIONS on purpose. ensure_labels() runs before any
+#: site is reconciled, so a failure creating this label must never be able to
+#: block an outage alert. The keep-alive path creates it itself, best-effort.
+KEEPALIVE_LABEL_DEFINITION = {
+    KEEPALIVE_LABEL: ("5319e7", "Reminder: push a commit so the schedule stays on"),
 }
 
 SITES = (

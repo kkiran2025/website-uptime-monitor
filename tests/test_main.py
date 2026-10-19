@@ -160,6 +160,65 @@ class TestNotificationTestMode(unittest.TestCase):
             self.assertEqual(main_module.main(["--dry-run"], env={}), main_module.EXIT_OK)
 
 
+class TestAlertOrdering(unittest.TestCase):
+    """A keep-alive problem must never cost a real outage alert."""
+
+    ENV = {"GITHUB_TOKEN": "x", "GITHUB_REPOSITORY": "kkiran2025/repo", "GITHUB_REPOSITORY_OWNER": "kkiran2025"}
+
+    def test_keepalive_failure_does_not_block_site_alerts_or_change_the_exit_code(self):
+        results = [
+            outcome(SITES[0], ok=False, reason=reasons.TIMEOUT, status=None, detail="timed out"),
+            outcome(SITES[1]),
+        ]
+        client = FakeGitHubClient(open_issue=None)
+        with mock.patch.object(main_module, "check_all", return_value=results), \
+                mock.patch.object(main_module.alerts, "client_from_env", return_value=client), \
+                mock.patch.object(main_module.alerts, "reconcile_keepalive",
+                                  side_effect=main_module.alerts.AlertError("boom")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main_module.main([], env=self.ENV)
+        self.assertEqual(code, main_module.EXIT_SITE_DOWN)
+        self.assertEqual(len(client.created), 1, "the outage incident must still be filed")
+        self.assertIn("keep-alive check failed", out.getvalue())
+
+    def test_an_unexpected_exception_is_contained_too(self):
+        results = [outcome(s) for s in SITES]
+        client = FakeGitHubClient(open_issue=None)
+        with mock.patch.object(main_module, "check_all", return_value=results), \
+                mock.patch.object(main_module.alerts, "client_from_env", return_value=client), \
+                mock.patch.object(main_module.alerts, "reconcile_keepalive",
+                                  side_effect=AttributeError("unexpected shape")), \
+                mock.patch.object(main_module, "write_step_summary") as summary, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main_module.main([], env=self.ENV)
+        self.assertEqual(code, main_module.EXIT_OK)
+        summary.assert_called_once()
+        self.assertIn("keep-alive check failed: AttributeError", out.getvalue())
+
+    def test_shared_label_setup_excludes_the_keepalive_label(self):
+        client = FakeGitHubClient(open_issue=None)
+        with mock.patch.object(main_module, "check_all", return_value=[outcome(s) for s in SITES]), \
+                mock.patch.object(main_module.alerts, "client_from_env", return_value=client), \
+                contextlib.redirect_stdout(io.StringIO()):
+            main_module.main([], env=self.ENV)
+        self.assertIsNone(client.label_sets_ensured[0], "first call must be the shared incident set")
+
+    def test_sites_are_reconciled_before_the_keepalive(self):
+        order = []
+        client = FakeGitHubClient(open_issue=None)
+        with mock.patch.object(main_module, "check_all", return_value=[outcome(s) for s in SITES]), \
+                mock.patch.object(main_module.alerts, "client_from_env", return_value=client), \
+                mock.patch.object(main_module.alerts, "reconcile",
+                                  side_effect=lambda o, s, c, **k: order.append(s.key) or
+                                  main_module.alerts.AlertAction(s.key, "healthy")), \
+                mock.patch.object(main_module.alerts, "reconcile_keepalive",
+                                  side_effect=lambda c, **k: order.append("keepalive") or
+                                  main_module.alerts.AlertAction("keepalive", "healthy")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            main_module.main([], env=self.ENV)
+        self.assertEqual(order, [s.key for s in SITES] + ["keepalive"])
+
+
 class TestAssignee(unittest.TestCase):
     def test_prefers_the_owner_variable(self):
         self.assertEqual(main_module.resolve_assignee({"GITHUB_REPOSITORY_OWNER": "kkiran2025"}), "kkiran2025")

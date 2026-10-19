@@ -7,7 +7,14 @@ import unittest
 
 from monitor import alerts, reasons
 from monitor.check import CheckOutcome
-from monitor.config import site_by_key
+from monitor.config import (
+    ALERT_LABEL,
+    KEEPALIVE_LABEL,
+    KEEPALIVE_LABEL_DEFINITION,
+    LABEL_DEFINITIONS,
+    SITES,
+    site_by_key,
+)
 from tests import fakes
 from tests.fakes import FakeGitHubClient
 
@@ -319,6 +326,127 @@ class TestClientGuards(unittest.TestCase):
     def test_missing_repository_is_refused(self):
         with self.assertRaises(alerts.AlertError):
             alerts.GitHubClient(token="x", repository="")
+
+
+class TestKeepalive(unittest.TestCase):
+    """The reminder that stops GitHub silently switching the schedule off."""
+
+    NOW = datetime.datetime(2026, 10, 19, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+    def _days_ago(self, days, hours=0):
+        return self.NOW - datetime.timedelta(days=days, hours=hours)
+
+    def _reconcile(self, client):
+        return alerts.reconcile_keepalive(client, assignee="kkiran2025", run_url=RUN_URL, moment=self.NOW)
+
+    def test_44_days_is_still_quiet(self):
+        client = FakeGitHubClient(last_push=self._days_ago(44, hours=23))
+        action = self._reconcile(client)
+        self.assertEqual(action.action, "healthy")
+        self.assertEqual(client.created, [])
+
+    def test_45_days_raises_one_reminder_assigned_to_the_owner(self):
+        client = FakeGitHubClient(last_push=self._days_ago(45))
+        action = self._reconcile(client)
+        self.assertEqual(action.action, "created")
+        self.assertEqual(len(client.created), 1)
+        issue = client.created[0]
+        self.assertEqual([a["login"] for a in issue["assignees"]], ["kkiran2025"])
+        self.assertEqual(issue["labels"], [KEEPALIVE_LABEL])
+
+    def test_reminder_names_the_switch_off_date(self):
+        client = FakeGitHubClient(last_push=self._days_ago(45))
+        self._reconcile(client)
+        # 45 days ago + 60 days = 15 days from NOW.
+        self.assertIn("2026-11-03", client.created[0]["title"])
+        self.assertIn("2026-11-03", client.created[0]["body"])
+
+    def test_reminder_notifies_by_assignment_not_by_mention(self):
+        client = FakeGitHubClient(last_push=self._days_ago(50))
+        self._reconcile(client)
+        self.assertNotIn("@", client.created[0]["body"])
+
+    def test_an_open_reminder_is_never_duplicated(self):
+        client = FakeGitHubClient(last_push=self._days_ago(55), open_keepalive={"number": 9})
+        action = self._reconcile(client)
+        self.assertEqual(action.action, "unchanged")
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.comments, [])
+
+    def test_a_new_push_closes_the_reminder_once(self):
+        client = FakeGitHubClient(last_push=self._days_ago(0, hours=2), open_keepalive={"number": 9})
+        action = self._reconcile(client)
+        self.assertEqual(action.action, "resolved")
+        self.assertEqual([n for n, _ in client.comments], [9])
+        self.assertEqual(client.closed, [9])
+
+    def test_unreadable_commit_date_changes_nothing(self):
+        client = FakeGitHubClient(last_push=None, open_keepalive={"number": 9})
+        action = self._reconcile(client)
+        self.assertEqual(action.action, "skipped")
+        self.assertEqual((client.created, client.comments, client.closed), ([], [], []))
+
+    def test_a_naive_timestamp_is_treated_as_utc(self):
+        naive = self._days_ago(46).replace(tzinfo=None)
+        client = FakeGitHubClient(last_push=naive)
+        self.assertEqual(self._reconcile(client).action, "created")
+
+    def test_running_again_after_closing_does_nothing_more(self):
+        client = FakeGitHubClient(last_push=self._days_ago(0, hours=2), open_keepalive={"number": 9})
+        self._reconcile(client)
+        client.open_keepalive = None  # GitHub now reports it closed
+        self.assertEqual(self._reconcile(client).action, "healthy")
+        self.assertEqual(len(client.comments), 1)
+        self.assertEqual(client.closed, [9])
+
+    def test_its_label_is_created_only_on_the_keepalive_path(self):
+        """The shared set is ensured BEFORE outage alerts; this label must not be in it."""
+        self.assertNotIn(KEEPALIVE_LABEL, LABEL_DEFINITIONS)
+        client = FakeGitHubClient(last_push=self._days_ago(45))
+        self._reconcile(client)
+        self.assertEqual(client.label_sets_ensured, [KEEPALIVE_LABEL_DEFINITION])
+
+    def test_the_label_can_never_be_mistaken_for_an_incident(self):
+        self.assertNotEqual(KEEPALIVE_LABEL, ALERT_LABEL)
+        for site in SITES:
+            with self.subTest(site=site.key):
+                self.assertNotIn(KEEPALIVE_LABEL, site.issue_labels)
+
+
+class TestKeepaliveLookupAtClientLevel(unittest.TestCase):
+    def test_an_unreadable_issue_list_is_an_error_not_an_empty_list(self):
+        """Reading "unreadable" as "none open" would file a duplicate every run."""
+        for body in (b"", b"not json", b'{"message": "Server Error"}'):
+            with self.subTest(body=body):
+                opener = fakes.FakeOpener([fakes.FakeResponse(200, {"Content-Type": "application/json"}, body)])
+                client = alerts.GitHubClient(token="x", repository="a/b", opener=opener)
+                with self.assertRaises(alerts.AlertError):
+                    client.find_open_keepalive()
+
+    def test_an_empty_list_means_no_reminder(self):
+        opener = fakes.FakeOpener([fakes.FakeResponse(200, {"Content-Type": "application/json"}, b"[]")])
+        client = alerts.GitHubClient(token="x", repository="a/b", opener=opener)
+        self.assertIsNone(client.find_open_keepalive())
+
+
+class TestLastPushDateAtClientLevel(unittest.TestCase):
+    def _client(self, payload):
+        body = json.dumps(payload).encode("utf-8")
+        opener = fakes.FakeOpener([fakes.FakeResponse(200, {"Content-Type": "application/json"}, body)])
+        return alerts.GitHubClient(token="x", repository="a/b", opener=opener), opener
+
+    def test_reads_the_server_recorded_push_time(self):
+        client, opener = self._client({"pushed_at": "2026-10-19T10:46:00Z", "updated_at": "2020-01-01T00:00:00Z"})
+        moment = client.last_push_date()
+        self.assertEqual((moment.year, moment.month, moment.day), (2026, 10, 19))
+        self.assertTrue(opener.calls[0][0].endswith("/repos/a/b"))
+        self.assertEqual(opener.calls[0][1], "GET")
+
+    def test_unexpected_shapes_return_none(self):
+        for payload in ([], {}, {"pushed_at": None}, {"pushed_at": {"unexpected": "object"}}):
+            with self.subTest(payload=payload):
+                client, _ = self._client(payload)
+                self.assertIsNone(client.last_push_date())
 
 
 if __name__ == "__main__":

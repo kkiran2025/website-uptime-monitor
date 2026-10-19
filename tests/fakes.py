@@ -93,8 +93,12 @@ class FakeOpener:
 class FakeGitHubClient:
     """In-memory stand-in for alerts.GitHubClient. Records every mutation."""
 
-    def __init__(self, open_issue=None, assignable=True, reject_assignees=False):
+    def __init__(self, open_issue=None, assignable=True, reject_assignees=False,
+                 last_push=None, open_keepalive=None):
         self.open_issue = open_issue
+        #: datetime of the last push, or None for "could not be read".
+        self.last_push = last_push
+        self.open_keepalive = open_keepalive
         self.assignable = assignable
         #: Simulate GitHub's 422 when the owner is not an assignable user.
         self.reject_assignees = reject_assignees
@@ -103,12 +107,14 @@ class FakeGitHubClient:
         self.updates = []
         self.closed = []
         self.labels_ensured = 0
+        self.label_sets_ensured = []
 
     def existing_labels(self):
         return set()
 
-    def ensure_labels(self):
+    def ensure_labels(self, definitions=None):
         self.labels_ensured += 1
+        self.label_sets_ensured.append(definitions)
         return []
 
     def is_assignable(self, login):
@@ -116,6 +122,12 @@ class FakeGitHubClient:
 
     def find_open_incident(self, site_label):
         return self.open_issue
+
+    def find_open_keepalive(self):
+        return self.open_keepalive
+
+    def last_push_date(self):
+        return self.last_push
 
     def create_issue(self, title, body, labels, assignees):
         if self.reject_assignees:

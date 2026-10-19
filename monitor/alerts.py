@@ -25,7 +25,14 @@ import urllib.request
 from dataclasses import dataclass
 
 from . import reasons
-from .config import ALERT_LABEL, LABEL_DEFINITIONS
+from .config import (
+    ALERT_LABEL,
+    KEEPALIVE_DISABLE_DAYS,
+    KEEPALIVE_LABEL,
+    KEEPALIVE_LABEL_DEFINITION,
+    KEEPALIVE_WARN_DAYS,
+    LABEL_DEFINITIONS,
+)
 
 try:
     from zoneinfo import ZoneInfo
@@ -174,11 +181,12 @@ class GitHubClient:
         _, data = self._request("GET", f"/repos/{self.repository}/labels?per_page=100")
         return {item["name"] for item in (data or [])}
 
-    def ensure_labels(self):
+    def ensure_labels(self, definitions=None):
         """Create any missing labels. Also proves `issues: write` really works."""
+        definitions = LABEL_DEFINITIONS if definitions is None else definitions
         present = self.existing_labels()
         created = []
-        for name, (colour, description) in LABEL_DEFINITIONS.items():
+        for name, (colour, description) in definitions.items():
             if name in present:
                 continue
             self._request(
@@ -211,6 +219,35 @@ class GitHubClient:
                 continue
             return issue
         return None
+
+    def find_open_keepalive(self):
+        labels = urllib.parse.quote(KEEPALIVE_LABEL)
+        _, data = self._request(
+            "GET",
+            f"/repos/{self.repository}/issues?state=open&labels={labels}&per_page=20",
+        )
+        if not isinstance(data, list):
+            # Never read "unreadable" as "no reminder open" - that path would
+            # file a duplicate reminder on every run.
+            raise AlertError("could not read open keep-alive reminders")
+        for issue in data:
+            if not isinstance(issue, dict) or "pull_request" in issue:
+                continue
+            return issue
+        return None
+
+    # --- repository activity (contents: read) -------------------------------
+
+    def last_push_date(self):
+        """When anything was last pushed to the repository, or None.
+
+        Deliberately the server-recorded push time, NOT a commit's committer
+        date: that date is set by whoever made the commit, so pushing commits
+        made weeks ago locally would otherwise look like no activity at all.
+        """
+        _, data = self._request("GET", f"/repos/{self.repository}")
+        value = data.get("pushed_at") if isinstance(data, dict) else None
+        return parse_github_timestamp(value) if isinstance(value, str) else None
 
     def create_issue(self, title, body, labels, assignees):
         payload = {"title": title, "body": body, "labels": list(labels)}
@@ -378,6 +415,93 @@ def reconcile(outcome, site, client, assignee=None, run_url="", moment=None):
         return AlertAction(site.key, "commented", issue["number"], f"reason changed {previous} -> {outcome.reason}")
 
     return AlertAction(site.key, "unchanged", issue["number"], "incident already open; staying quiet")
+
+
+# --- Keep-alive reminder ----------------------------------------------------
+#
+# GitHub silently switches this schedule off after 60 days without repository
+# activity, and the workflow's own runs do not count. Fixing that automatically
+# would need contents: write, so instead the monitor tells the owner in time:
+#
+#   last push >= 45 days ago + no open reminder -> one issue, assigned (phone)
+#   last push >= 45 days ago + open reminder    -> stay silent
+#   recent push              + open reminder    -> one comment, then close
+#   recent push              + no reminder      -> do nothing
+
+
+def keepalive_body(last_push, moment, run_url) -> str:
+    deadline = last_push + datetime.timedelta(days=KEEPALIVE_DISABLE_DAYS)
+    age_days = int((moment - last_push).total_seconds() // 86400)
+    lines = [
+        "**GitHub will soon switch off the scheduled uptime checks.**",
+        "",
+        f"GitHub turns scheduled workflows off after {KEEPALIVE_DISABLE_DAYS} days "
+        "without repository activity, and the monitor's own runs do not count. "
+        "After that, no outage alert can arrive.",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Last push (UTC) | {format_utc(last_push)} |",
+        f"| Last push (UK) | {format_london(last_push)} |",
+        f"| Days since | {age_days} |",
+        f"| Switch-off expected around | {deadline:%Y-%m-%d} |",
+        "",
+        "**What to do:** push any commit to the default branch. This reminder "
+        "closes itself on the first check after that push.",
+        "",
+        f"[View the run]({run_url})" if run_url else "",
+    ]
+    return "\n".join(lines)
+
+
+def keepalive_cleared_comment(last_push) -> str:
+    return "\n".join(
+        [
+            "✅ **A new push has landed — the schedule stays on.**",
+            "",
+            f"- **Last push (UTC):** {format_utc(last_push)}",
+            f"- **Last push (UK):** {format_london(last_push)}",
+            "",
+            "Closing this reminder.",
+        ]
+    )
+
+
+def reconcile_keepalive(client, assignee=None, run_url="", moment=None):
+    """Open, keep, or close the single keep-alive reminder issue."""
+    moment = moment or now_utc()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    last = client.last_push_date()
+    if last is None:
+        return AlertAction("keepalive", "skipped", detail="could not read the last push date")
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=datetime.timezone.utc)
+
+    age_days = (moment - last).total_seconds() / 86400
+    issue = client.find_open_keepalive()
+
+    if age_days >= KEEPALIVE_WARN_DAYS:
+        if issue is not None:
+            return AlertAction("keepalive", "unchanged", issue["number"], "reminder already open; staying quiet")
+        deadline = last + datetime.timedelta(days=KEEPALIVE_DISABLE_DAYS)
+        client.ensure_labels(KEEPALIVE_LABEL_DEFINITION)
+        created = client.create_issue(
+            f"⏰ Keep-alive due — push a commit before {deadline:%Y-%m-%d}",
+            keepalive_body(last, moment, run_url),
+            [KEEPALIVE_LABEL],
+            [assignee] if assignee else [],
+        )
+        return AlertAction(
+            "keepalive", "created", (created or {}).get("number"), f"last push {int(age_days)} days ago"
+        )
+
+    if issue is not None:
+        client.add_comment(issue["number"], keepalive_cleared_comment(last))
+        client.close_issue(issue["number"])
+        return AlertAction("keepalive", "resolved", issue["number"], "new push found; reminder closed")
+
+    return AlertAction("keepalive", "healthy", detail=f"last push {int(age_days)} days ago")
 
 
 # --- Environment helpers ----------------------------------------------------

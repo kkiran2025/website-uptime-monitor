@@ -223,6 +223,47 @@ def run_notification_test(env):
     return EXIT_OK
 
 
+def reconcile_alerts(results, sites, env, log):
+    """Bring GitHub issues in line with this run. Never raises AlertError."""
+    alert_actions = []
+    run_url = alerts.run_url_from_env(env)
+    assignee = resolve_assignee(env)
+    try:
+        client = alerts.client_from_env(env)
+        client.ensure_labels()
+    except alerts.AlertError as exc:
+        print(f"::warning::alerting unavailable ({exc}); check results above are still valid", file=log)
+        return alert_actions
+
+    # Pair each outcome with its own site by key rather than by position, so a
+    # future change to check_all cannot silently file an incident against the
+    # wrong website.
+    by_key = {site.key: site for site in sites}
+    for outcome in results:
+        site = by_key.get(outcome.site_key)
+        if site is None:  # pragma: no cover - defensive
+            print(f"::warning::no site config for '{outcome.site_key}'; skipping alert", file=log)
+            continue
+        try:
+            action = alerts.reconcile(outcome, site, client, assignee=assignee, run_url=run_url)
+            alert_actions.append(action)
+            print(f"alert[{site.key}]: {action.action} {action.detail}", file=log)
+        except alerts.AlertError as exc:
+            print(f"::warning::alerting failed for {site.key}: {exc}", file=log)
+
+    # After the sites, never before: a keep-alive problem must not delay or
+    # block a real outage alert, and it never changes the exit code. This is an
+    # optional feature, so ANY exception is contained here - an unexpected one
+    # escaping would skip the job summary and the exit-code decision.
+    try:
+        action = alerts.reconcile_keepalive(client, assignee=assignee, run_url=run_url)
+        alert_actions.append(action)
+        print(f"alert[keepalive]: {action.action} {action.detail}", file=log)
+    except Exception as exc:  # noqa: BLE001 - deliberate optional-feature boundary
+        print(f"::warning::keep-alive check failed: {type(exc).__name__}: {exc}", file=log)
+    return alert_actions
+
+
 def main(argv=None, env=None):
     env = env if env is not None else os.environ
     parser = argparse.ArgumentParser(description="Read-only uptime monitor (public HTTP GET only).")
@@ -262,34 +303,11 @@ def main(argv=None, env=None):
     for outcome in results:
         print(summarise(outcome), file=log)
 
-    alert_actions = []
     if args.dry_run:
         print("\n[dry-run] GitHub was not contacted; no issue was created, commented on or closed.", file=log)
+        alert_actions = []
     else:
-        run_url = alerts.run_url_from_env(env)
-        assignee = resolve_assignee(env)
-        try:
-            client = alerts.client_from_env(env)
-            client.ensure_labels()
-        except alerts.AlertError as exc:
-            print(f"::warning::alerting unavailable ({exc}); check results above are still valid", file=log)
-            client = None
-        if client is not None:
-            # Pair each outcome with its own site by key rather than by
-            # position, so a future change to check_all cannot silently file an
-            # incident against the wrong website.
-            by_key = {site.key: site for site in sites}
-            for outcome in results:
-                site = by_key.get(outcome.site_key)
-                if site is None:  # pragma: no cover - defensive
-                    print(f"::warning::no site config for '{outcome.site_key}'; skipping alert", file=log)
-                    continue
-                try:
-                    action = alerts.reconcile(outcome, site, client, assignee=assignee, run_url=run_url)
-                    alert_actions.append(action)
-                    print(f"alert[{site.key}]: {action.action} {action.detail}", file=log)
-                except alerts.AlertError as exc:
-                    print(f"::warning::alerting failed for {site.key}: {exc}", file=log)
+        alert_actions = reconcile_alerts(results, sites, env, log)
 
     if args.json:
         print(json.dumps([vars(outcome) for outcome in results], indent=2, default=str))

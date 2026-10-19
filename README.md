@@ -94,7 +94,8 @@ bury a real outage behind three identical attempts.
 ## Alerting
 
 Labels: `uptime-alert` plus one per site — `uptime-direct-packaging`,
-`uptime-mr-corn`.
+`uptime-mr-corn`. The keep-alive reminder (below) uses its own label,
+`uptime-keepalive`, so it can never be mistaken for an outage.
 
 | Situation | What happens |
 | --- | --- |
@@ -163,6 +164,15 @@ This is documented GitHub behaviour and the main way a monitor like this dies
 quietly. **The workflow's own runs do not count as activity.** It is not worked
 around automatically, because doing so would need `contents: write` and would
 defeat the least-privilege permissions above.
+
+Instead, every run reads the repository's last **push** time, as recorded by
+GitHub (`contents: read` is enough). A commit's own date is not used, because
+it is set by whoever made the commit. Once the last push is **45 days** old,
+the monitor opens **one** `⏰ Keep-alive due` issue assigned to the owner — a
+phone notification, about two weeks before the switch-off — and names the
+expected switch-off date. It never repeats itself, and it closes the reminder
+on the first run after a new push. A failure in this check never delays or
+blocks an outage alert.
 
 GitHub does not define what counts as "repository activity". The one action
 known to reset the clock is **a commit pushed to `main`**, so do that at least
