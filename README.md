@@ -141,10 +141,22 @@ python3 -m unittest discover -s tests -t . -v
 
 ## Operational notes worth knowing
 
-### Scheduled runs can be late
-GitHub schedules are best-effort. A run can start several minutes late, or be
-skipped under platform load. Treat the cadence as *"about every five minutes"*
-and do not read an outage into a late or missing run.
+### Scheduled runs are far less frequent than the cron line says
+GitHub schedules are best-effort, and on this repository "best-effort" means
+**much** less often than every five minutes. Measured from the Actions history
+for 2026-09-04 to 2026-10-19 (274 scheduled runs):
+
+| Measure | Requested | Actually delivered |
+| --- | --- | --- |
+| Runs per day | 288 | **4–9** |
+| Typical gap between runs | 5 min | **~3 h 50 min** |
+| Longest gap | 5 min | **~9 h 21 min** |
+
+So an outage can go unnoticed for several hours, and the outage duration in a
+recovery comment is only accurate to within the gap between runs. Do not read
+an outage into a late or missing run. A fix — an external timer that starts the
+check through `workflow_dispatch` — is planned; until it lands, treat this
+monitor as a coarse safety net, not a five-minute alarm.
 
 ### GitHub disables schedules after 60 days of repository inactivity
 This is documented GitHub behaviour and the main way a monitor like this dies
@@ -152,10 +164,12 @@ quietly. **The workflow's own runs do not count as activity.** It is not worked
 around automatically, because doing so would need `contents: write` and would
 defeat the least-privilege permissions above.
 
-To keep it alive, do any one of these every couple of months: push a commit,
-open or close an issue by hand, or re-enable the workflow from the Actions tab.
-If alerts go quiet for a long stretch, check the Actions tab first — GitHub
-shows a banner when a schedule has been disabled.
+GitHub does not define what counts as "repository activity". The one action
+known to reset the clock is **a commit pushed to `main`**, so do that at least
+every 50 days. Last push: **2026-10-19**, so the next one is due by
+**2026-12-08** (the hard cut-off is about 2026-12-18). If alerts go quiet for a
+long stretch, check the Actions tab first — GitHub shows a banner when a
+schedule has been disabled, and the workflow can be re-enabled from there.
 
 ### Cost
 Actions minutes on **standard runners are free and unmetered for public
