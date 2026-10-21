@@ -3,7 +3,7 @@ handoff_version: 2
 handoff_id: "2026-10-19-01"
 workstream: "uptime-monitor-fix"
 title: "Uptime monitor fix — Step 5: measure the 5-minute cadence, then document it"
-status: "open"
+status: "completed"
 priority: 1
 created_at: "2026-10-19T15:21:52+01:00"
 updated_at: "2026-10-19T15:21:52+01:00"
@@ -13,6 +13,8 @@ depends_on: []
 supersedes: []
 next_action: "After 13:55 London on 2026-10-20, measure 24 h of 'Uptime monitor' runs since 2026-10-19T12:55:00Z with gh run list."
 ---
+
+> ✅ Completed: 2026-10-21
 
 # Uptime monitor fix — Step 5 handoff
 
@@ -99,3 +101,5 @@ Never ask me for the GitHub token value.
 ```
 
 Resume command: `/handoff-next docs/handoffs/2026-10-19-uptime-monitor-fix-handoff-01.md`
+
+**CLOSED 2026-10-21** — commit `a9519c6` on the production branch.
