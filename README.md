@@ -29,8 +29,11 @@ This project is **strictly read-only** with respect to both websites. It:
 - sends roughly **1.3 MB per five-minute cycle** across both sites — one request
   each, which is negligible load.
 
-The only credential used is GitHub's own ephemeral `GITHUB_TOKEN`, injected by
-Actions at runtime and scoped to `contents: read` + `issues: write`.
+The only credential the monitor itself uses is GitHub's own ephemeral
+`GITHUB_TOKEN`, injected by Actions at runtime and scoped to `contents: read` +
+`issues: write`. The separate token that starts the workflow every five minutes
+lives only inside cron-job.org and never reaches this code (see *What starts the
+check every five minutes*, below).
 
 ---
 
@@ -142,22 +145,43 @@ python3 -m unittest discover -s tests -t . -v
 
 ## Operational notes worth knowing
 
-### Scheduled runs are far less frequent than the cron line says
-GitHub schedules are best-effort, and on this repository "best-effort" means
-**much** less often than every five minutes. Measured from the Actions history
-for 2026-09-04 to 2026-10-19 (274 scheduled runs):
+### What starts the check every five minutes
+GitHub's own `cron` schedule is best-effort, and on this repository it is **much**
+slower than requested. Measured from the Actions history for 2026-09-04 to
+2026-10-19 (274 scheduled runs): 4–9 runs a day, a typical gap of ~3 h 50 min and
+a longest gap of ~9 h 21 min. So the real five-minute timer is external:
 
-| Measure | Requested | Actually delivered |
+- **cron-job.org** runs a job every 5 minutes (`*/5`, Europe/London) that sends
+  `POST https://api.github.com/repos/kkiran2025/website-uptime-monitor/actions/workflows/uptime-monitor.yml/dispatches`
+  with body `{"ref":"main"}`, starting the workflow through `workflow_dispatch`.
+- It authenticates with a fine-grained personal access token named
+  `uptime-monitor-cron-job-org`: **this repository only**, *Actions: read and
+  write* (plus the mandatory read-only *Metadata*). The token is stored **only**
+  inside the cron-job.org job and nowhere in this repository.
+- cron-job.org emails the owner after 3 consecutive failures, on recovery, and
+  if the job is auto-disabled.
+- GitHub's own `cron` line stays in the workflow as a fallback.
+
+Measured over the first 24 hours (2026-10-19 12:55 UTC → 2026-10-20 12:55 UTC):
+
+| Measure | Target | Delivered |
 | --- | --- | --- |
-| Runs per day | 288 | **4–9** |
-| Typical gap between runs | 5 min | **~3 h 50 min** |
-| Longest gap | 5 min | **~9 h 21 min** |
+| Runs | ≥ 250 | **294** (288 via `workflow_dispatch`, 6 via `schedule`) |
+| Typical gap between runs | 5 min | **5.0 min** (median) |
+| Longest gap | ≲ 10 min | **5.6 min** |
+| Failed runs | 0 | **0** |
 
-So an outage can go unnoticed for several hours, and the outage duration in a
-recovery comment is only accurate to within the gap between runs. Do not read
-an outage into a late or missing run. A fix — an external timer that starts the
-check through `workflow_dispatch` — is planned; until it lands, treat this
-monitor as a coarse safety net, not a five-minute alarm.
+#### Token renewal — due before 2027-10-18
+The token expires on **2027-10-18**; after that the dispatches fail and the
+monitor falls back to GitHub's slow schedule. Before that date:
+
+1. Create a new fine-grained token with the same scope (this repository only,
+   Actions: read and write).
+2. Paste it into the cron-job.org job's `Authorization: Bearer …` header.
+3. Save the job, then run **TEST RUN** in cron-job.org and expect HTTP `204`.
+4. Confirm that a later run starts by itself (event `workflow_dispatch` in the
+   Actions tab, about five minutes on).
+5. Only then delete the old token on GitHub.
 
 ### GitHub disables schedules after 60 days of repository inactivity
 This is documented GitHub behaviour and the main way a monitor like this dies
@@ -190,9 +214,9 @@ around day 7 of every month and checks would silently stop. That is why this
 repository is public.
 
 ### Changing the cadence
-Edit the `cron` line in
+The real cadence is the cron-job.org job's schedule. GitHub's fallback `cron` line is in
 [`.github/workflows/uptime-monitor.yml`](.github/workflows/uptime-monitor.yml).
-Cron is always **UTC**, so a UK-hours schedule shifts by an hour between GMT
+GitHub cron is always **UTC**, so a UK-hours schedule shifts by an hour between GMT
 and BST.
 
 ---
@@ -209,6 +233,6 @@ monitor/
   main.py       CLI entry point
 tests/          unit tests, fixtures only, no network
 .github/workflows/
-  uptime-monitor.yml   the every-5-minutes check
+  uptime-monitor.yml   the check itself (started every 5 min via cron-job.org)
   tests.yml            runs the suite on push
 ```
